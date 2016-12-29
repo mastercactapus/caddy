@@ -39,6 +39,9 @@ type Upstream interface {
 	// Gets how long to wait between selecting upstream
 	// hosts in the case of cascading failures.
 	GetTryInterval() time.Duration
+
+	// Gets the number of upstream hosts.
+	GetHostCount() int
 }
 
 // UpstreamHostDownFunc can be used to customize how Down behaves.
@@ -94,13 +97,27 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 	// outreq is the request that makes a roundtrip to the backend
 	outreq := createUpstreamRequest(r)
 
-	// record and replace outreq body
-	body, err := newBufferedBody(outreq.Body)
-	if err != nil {
-		return http.StatusBadRequest, errors.New("failed to read downstream request body")
-	}
-	if body != nil {
-		outreq.Body = body
+	// Commonly there is only one upstream host defined,
+	// which allows us to introduce a major optimization:
+	var body rewindableReader
+	if upstream.GetHostCount() == 1 {
+		// If only one upstream is defined we don't need to buffer the body.
+		// Instead we directly stream the body to the upstream host,
+		// which reduces memory usage as well as latency.
+		// Furthermore this enables different kinds of HTTP streaming
+		// applications like gRPC for instance.
+		body = newUnbufferedBody(outreq.Body)
+	} else {
+		// If more than one upstream is defined we have to record the outreq body first.
+		// Otherwise it'd be impossible to rewind and replay the request
+		// in case the first upstream host failed.
+		var err error
+		if body, err = newBufferedBody(outreq.Body); err != nil {
+			return http.StatusBadRequest, errors.New("failed to read downstream request body")
+		}
+		if body != nil {
+			outreq.Body = body
+		}
 	}
 
 	// The keepRetrying function will return true if we should
@@ -173,15 +190,23 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 			downHeaderUpdateFn = createRespHeaderUpdateFn(host.DownstreamHeaders, replacer)
 		}
 
-		// rewind request body to its beginning
-		if err := body.rewind(); err != nil {
-			return http.StatusInternalServerError, errors.New("unable to rewind downstream request body")
+		// Rewind the request body to its beginning, as long as
+		// this is not the first upstream host [1].
+		//
+		// [1]: unbufferedBody does not support
+		// rewinding but is used if only one upstream host exists.
+		if backendErr != nil {
+			if err := body.rewind(); err != nil {
+				return http.StatusInternalServerError, errors.New("unable to rewind downstream request body")
+			}
 		}
 
 		// tell the proxy to serve the request
-		atomic.AddInt64(&host.Conns, 1)
-		backendErr = proxy.ServeHTTP(w, outreq, downHeaderUpdateFn)
-		atomic.AddInt64(&host.Conns, -1)
+		func() {
+			atomic.AddInt64(&host.Conns, 1)
+			defer atomic.AddInt64(&host.Conns, -1)
+			backendErr = proxy.ServeHTTP(w, outreq, downHeaderUpdateFn)
+		}()
 
 		// if no errors, we're done here
 		if backendErr == nil {
@@ -197,10 +222,10 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 		timeout := host.FailTimeout
 		if timeout > 0 {
 			atomic.AddInt32(&host.Fails, 1)
-			go func(host *UpstreamHost, timeout time.Duration) {
+			go func() {
 				time.Sleep(timeout)
 				atomic.AddInt32(&host.Fails, -1)
-			}(host, timeout)
+			}()
 		}
 
 		// if we've tried long enough, break
