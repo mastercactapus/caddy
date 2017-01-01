@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"io/ioutil"
 )
@@ -37,7 +38,7 @@ type unbufferedBody struct {
 var _ rewindableReader = &unbufferedBody{}
 
 func (b *unbufferedBody) rewind() error {
-	panic("cannot rewind unbuffered body")
+	return errors.New("cannot rewind unbuffered body")
 }
 
 // newBufferedBody returns *bufferedBody to use in place of src. Closes src

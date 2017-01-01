@@ -97,20 +97,20 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 	// outreq is the request that makes a roundtrip to the backend
 	outreq := createUpstreamRequest(r)
 
-	// Commonly there is only one upstream host defined,
-	// which allows us to introduce a major optimization:
+	// If we have more than one upstream host defined and if retrying is enabled
+	// by setting try_duration to a non-zero value, caddy will try to
+	// retry the request at a different host if the first one failed.
+	//
+	// This requires us to possibly rewind and replay the request body though,
+	// which in turn requires us to buffer the request body first.
+	//
+	// An unbuffered request is usually preferrable, because it reduces latency
+	// as well as memory usage. Furthermore it enables different kinds of
+	// HTTP streaming applications like gRPC for instance.
+	requiresBuffering := upstream.GetHostCount() > 1 && upstream.GetTryDuration() != 0
+
 	var body rewindableReader
-	if upstream.GetHostCount() == 1 {
-		// If only one upstream is defined we don't need to buffer the body.
-		// Instead we directly stream the body to the upstream host,
-		// which reduces memory usage as well as latency.
-		// Furthermore this enables different kinds of HTTP streaming
-		// applications like gRPC for instance.
-		body = newUnbufferedBody(outreq.Body)
-	} else {
-		// If more than one upstream is defined we have to record the outreq body first.
-		// Otherwise it'd be impossible to rewind and replay the request
-		// in case the first upstream host failed.
+	if requiresBuffering {
 		var err error
 		if body, err = newBufferedBody(outreq.Body); err != nil {
 			return http.StatusBadRequest, errors.New("failed to read downstream request body")
@@ -118,6 +118,8 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 		if body != nil {
 			outreq.Body = body
 		}
+	} else {
+		body = newUnbufferedBody(outreq.Body)
 	}
 
 	// The keepRetrying function will return true if we should
@@ -190,12 +192,9 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 			downHeaderUpdateFn = createRespHeaderUpdateFn(host.DownstreamHeaders, replacer)
 		}
 
-		// Rewind the request body to its beginning, as long as
-		// this is not the first upstream host [1].
-		//
-		// [1]: unbufferedBody does not support
-		// rewinding but is used if only one upstream host exists.
-		if backendErr != nil {
+		// NOTE: We check for requiresBuffering, because
+		// only a bufferedBody supports rewinding.
+		if requiresBuffering {
 			if err := body.rewind(); err != nil {
 				return http.StatusInternalServerError, errors.New("unable to rewind downstream request body")
 			}
