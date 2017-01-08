@@ -3,7 +3,6 @@ package proxy
 
 import (
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -110,17 +109,14 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 	// HTTP streaming applications like gRPC for instance.
 	requiresBuffering := upstream.GetHostCount() > 1 && upstream.GetTryDuration() != 0
 
-	var body io.ReadCloser
 	if requiresBuffering {
-		var err error
-		if body, err = newBufferedBody(outreq.Body); err != nil {
+		body, err := newBufferedBody(outreq.Body)
+		if err != nil {
 			return http.StatusBadRequest, errors.New("failed to read downstream request body")
 		}
 		if body != nil {
 			outreq.Body = body
 		}
-	} else {
-		body = newUnbufferedBody(outreq.Body)
 	}
 
 	// The keepRetrying function will return true if we should
@@ -193,6 +189,14 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 			downHeaderUpdateFn = createRespHeaderUpdateFn(host.DownstreamHeaders, replacer)
 		}
 
+		// Before we retry the request we have to make sure
+		// that the body is rewound to it's beginning.
+		if bb, ok := outreq.Body.(*bufferedBody); ok {
+			if err := bb.rewind(); err != nil {
+				return http.StatusInternalServerError, errors.New("unable to rewind downstream request body")
+			}
+		}
+
 		// tell the proxy to serve the request
 		func() {
 			atomic.AddInt64(&host.Conns, 1)
@@ -223,16 +227,6 @@ func (p Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 		// if we've tried long enough, break
 		if !keepRetrying() {
 			break
-		}
-
-		// Before we retry the request we have to make sure
-		// that the body is rewound to it's beginning.
-		//
-		// NOTE:
-		//   Reaching this point implies that keepRetrying() above returned true,
-		//   which in turn implies that body must be a *bufferedBody.
-		if err := body.(*bufferedBody).rewind(); err != nil {
-			return http.StatusInternalServerError, errors.New("unable to rewind downstream request body")
 		}
 	}
 

@@ -23,8 +23,6 @@ func (b *bufferedBody) rewind() error {
 	return err
 }
 
-type unbufferedBody io.ReadCloser
-
 // newBufferedBody returns *bufferedBody to use in place of src. Closes src
 // and returns Read error on src. All content from src is buffered.
 func newBufferedBody(src io.ReadCloser) (*bufferedBody, error) {
@@ -39,10 +37,4 @@ func newBufferedBody(src io.ReadCloser) (*bufferedBody, error) {
 	return &bufferedBody{
 		Reader: bytes.NewReader(b),
 	}, nil
-}
-
-// newUnbufferedBody returns *unbufferedBody as an interface
-// to interchangably use it with newBufferedBody().
-func newUnbufferedBody(src io.ReadCloser) unbufferedBody {
-	return unbufferedBody(src)
 }
