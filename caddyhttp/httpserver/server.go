@@ -140,9 +140,17 @@ func (s *Server) Listen() (net.Listener, error) {
 		}
 	}
 
-	// Very important to return a concrete caddy.Listener
-	// implementation for graceful restarts.
-	return ln.(*net.TCPListener), nil
+	if tcpLn, ok := ln.(*net.TCPListener); ok {
+		ln = tcpKeepAliveListener{TCPListener: tcpLn}
+	}
+
+	for _, site := range s.sites {
+		for _, m := range site.listenerMiddleware {
+			ln = m(ln)
+		}
+	}
+
+	return ln, nil
 }
 
 // ListenPacket creates udp connection for QUIC if it is enabled,
@@ -159,10 +167,6 @@ func (s *Server) ListenPacket() (net.PacketConn, error) {
 
 // Serve serves requests on ln. It blocks until ln is closed.
 func (s *Server) Serve(ln net.Listener) error {
-	if tcpLn, ok := ln.(*net.TCPListener); ok {
-		ln = tcpKeepAliveListener{TCPListener: tcpLn}
-	}
-
 	ln = newGracefulListener(ln, &s.connWg)
 
 	s.listenerMu.Lock()
