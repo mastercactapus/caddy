@@ -150,7 +150,9 @@ func (s *Server) Listen() (net.Listener, error) {
 		}
 	}
 
-	return ln, nil
+	// Very important to return a concrete caddy.Listener
+	// implementation for graceful restarts.
+	return ln.(caddy.Listener), nil
 }
 
 // ListenPacket creates udp connection for QUIC if it is enabled,
